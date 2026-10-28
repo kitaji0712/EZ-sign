@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  core-tests:
+    name: Core tests (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.1-noble
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+
+  ios-build:
+    name: iOS build (unsigned)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: xcodebuild -version
+      - run: >
+          xcodebuild -project EZSign.xcodeproj -target EZSign -configuration Debug
+          -sdk iphoneos CODE_SIGNING_ALLOWED=NO build

@@ -1,2 +1,69 @@
-# EZ-sign
-paper display
+# EZ Sign
+
+電池のいらない NFC 電子ペーパー「EZ Sign」（Santek）を iPhone から書き換えて、机の上のタスク表示に使うためのアプリです。
+
+いまは第 1 段階として、**iPhone から書き込めるかを確かめるテストアプリ**になっています。ボタンを押してかざすと、テスト画面（4 色の見本・細かい模様・時刻）を書き込み、各手順にかかった時間をログに残します。
+
+## 必要なもの
+
+- Mac と Xcode 16 以降
+- Apple Developer Program（有料）。無料のアカウントでは NFC の機能が使えません
+- iOS 17 以降の iPhone（iPhone XS / XR 以降）
+- EZ Sign 4.2 インチ 4 色モデル
+
+## 動かし方
+
+1. リポジトリを取得して、作業ブランチに切り替えます。
+   ```sh
+   git clone https://github.com/kitaji0712/ez-sign.git
+   cd ez-sign
+   git checkout claude/gifted-tesla-eq173c
+   ```
+2. `EZSign.xcodeproj` をダブルクリックして Xcode で開きます（`Package.swift` はテスト用なので開かないでください）。
+3. 左の一覧で一番上の `EZSign` → TARGETS の `EZSign` → **Signing & Capabilities** を開き、**Team** に自分のチームを選びます。
+   - 「Bundle Identifier が使えない」と出たら、`com.kitaji0712.ezsign` を別の名前（例: `com.kitaji0712.ezsign2`）に変えてください。
+   - 同じ画面に **Near Field Communication Tag Reading** が表示されていれば OK です。なければ「+ Capability」から追加してください。
+4. iPhone をケーブルで Mac につなぎ、Xcode 上部の実行先で自分の iPhone を選んで ▶（⌘R）を押します。
+5. 初めての場合は iPhone 側で次の設定が必要です。
+   - 設定 → プライバシーとセキュリティ → **デベロッパモード** をオン（再起動を求められます）
+   - アプリを開けないときは、設定 → 一般 → **VPN とデバイス管理** で自分の開発元を信頼
+
+## 試し方
+
+1. アプリの「EZ Sign に書き込む」をタップします。
+2. iPhone の上部（カメラのあたり）を EZ Sign の中央に当て、「完了」と出るまで動かさないでください（30 秒前後かかります）。
+3. 結果を教えてください。
+   - EZ Sign に表示された画面の写真
+   - 「ログをコピー」で取ったログの全文
+
+### 見るところ
+
+| 確認すること | うまくいっていれば |
+|---|---|
+| 書き込めたか | 下の赤い行の番号と時刻が、今回押したときのものになっている |
+| 画素の並び | 文字が左右反転していない。左上に小さな赤い四角がある |
+| 色 | 黒・白・黄・赤の見本がその色で出ている |
+| 細かさ | 1 ピクセルの市松模様や細い横線がつぶれていない |
+| 時間 | ログに描画完了までの秒数と、接続が切れたかどうかが出ている |
+
+文字が左右反転したり崩れたりしたら、「画素の並び」を変えてもう一度試してください（4.2 インチは `row-mirror` のはずです）。
+
+## 構成
+
+| 場所 | 中身 |
+|---|---|
+| `EZSign/` | iPhone アプリ（SwiftUI と Core NFC） |
+| `Sources/EZSignCore/` | 画像の変換と通信手順。Apple のフレームワークを使わないので Mac / Linux でテストできます。アプリにも同じファイルが組み込まれます |
+| `Tests/EZSignCoreTests/` | `EZSignCore` のテスト |
+| `Config/` | Info.plist と entitlements（NFC の設定） |
+| `docs/PROTOCOL.md` | EZ Sign の通信手順と出典 |
+
+テストはリポジトリの直下で実行します。
+
+```sh
+swift test
+```
+
+## 注意
+
+EZ Sign の通信手順は公式に公開されたものではなく、有志の解析結果をもとにしています（`docs/PROTOCOL.md`）。パネルのファームウェアが変わると動かなくなるかもしれません。
