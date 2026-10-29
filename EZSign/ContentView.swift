@@ -36,13 +36,18 @@ struct ContentView: View {
                         }
                     }
                     Toggle("切れたらつなぎ直す", isOn: $controller.reconnectOnLoss)
-                    Toggle("約 20 秒の上限前にセッションを切り替える", isOn: $controller.switchSessionBeforeLimit)
+                    Picker("描画中の待ち方", selection: $controller.refreshStrategy) {
+                        ForEach(RefreshStrategy.allCases) { strategy in
+                            Text(strategy.rawValue).tag(strategy)
+                        }
+                    }
                 } header: {
                     Text("設定")
                 } footer: {
                     Text("4.2 インチは row-mirror で正しく表示されることを確認済みです。"
-                         + "iPhone は NFC のセッションを約 20 秒で打ち切るので、描画の途中で新しいセッションに切り替えます"
-                         + "（読み取り画面が一度閉じて、また開きます）。")
+                         + "iPhone は約 20 秒で通信を打ち切るので、描画（約 24 秒）の待ち方を選べます。"
+                         + "「静かに待つ」は読み取り画面を閉じずに待ち、"
+                         + "「セッション切り替え」は途中で読み取り画面が一度閉じて、また開きます。")
                 }
                 .disabled(controller.phase.isRunning)
 

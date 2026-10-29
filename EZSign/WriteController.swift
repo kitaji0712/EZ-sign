@@ -5,10 +5,21 @@ import UIKit
 /// 書き込み 1 回分の流れ。Core NFC のセッションを開き、EZ Sign が見つかったら
 /// テスト画面を送り、描画が終わるまで POLL する。途中経過はすべて log に残す。
 ///
-/// iPhone は EZ Sign を検出してから約 20 秒でセッションごと打ち切る（実機 2 回: 開始から 20.9 / 21.1 秒、
-/// 検出から 20.5 / 19.9 秒）。描画には約 24 秒かかるので 1 つのセッションでは終わらない。
-/// 同じセッションで restartPolling してもパネルは再検出されず、セッションが終わった（NFCError 202）。
-/// そこで上限の手前で今のセッションを閉じ、新しいセッションで描画の続きを待つ。
+/// iPhone はタグとの接続を約 20 秒で打ち切る。描画には約 24 秒かかるので、1 つの接続では終わらない。
+/// 実機の結果（docs/PROTOCOL.md）:
+/// - 1 回目: 接続から 20.5 秒で POLL が NFCError 103。直後にこのアプリがセッションを閉じていた
+/// - 2 回目: 17 秒で restartPolling したら、描画中のパネルは再検出されず、21.1 秒で NFCError 202
+/// 公式アプリは読み取り画面を閉じずに約 30 秒で書き込める。そこで描画中の待ち方を 2 通り用意する。
+enum RefreshStrategy: String, CaseIterable, Identifiable {
+    /// 接続が切られる前に POLL をやめ、セッションは開いたまま（電波は出たまま）描画が終わるのを待つ。
+    /// 終わったころにつなぎ直して完了を確かめる（公式アプリの動きからの推測）
+    case quietWait = "静かに待つ"
+    /// セッションの上限前に今のセッションを閉じ、新しいセッションで続きを待つ
+    case switchSession = "セッション切り替え"
+
+    var id: String { rawValue }
+}
+
 @MainActor
 final class WriteController: ObservableObject {
     enum Phase: Equatable {
@@ -45,13 +56,15 @@ final class WriteController: ObservableObject {
         didSet { preview = makePattern() }
     }
     @Published var reconnectOnLoss = true
-    @Published var switchSessionBeforeLimit = true
+    @Published var refreshStrategy: RefreshStrategy = .quietWait
 
-    /// セッションが打ち切られると見込む時間（実測より少し短めに見積もる）
+    /// 打ち切られると見込む時間（実測より少し短めに見積もる）
     private let limitFromBegin: Duration = .milliseconds(20_500)
     private let limitFromDetection: Duration = .milliseconds(19_500)
-    /// 上限のこれだけ前に新しいセッションへ切り替える
+    /// 上限のこれだけ前に POLL をやめる（静かに待つ）／新しいセッションへ切り替える
     private let switchMargin: Duration = .milliseconds(1_500)
+    /// 静かに待つとき、REFRESH からこの時間まで待ってから完了を確かめる（PC での実測 約 24 秒 + 余裕）
+    private let expectedRefreshTime: Duration = .seconds(26)
     /// 位置確認から REFRESH まで（実測 約 6.6 秒）に余裕を足した時間。残りが足りなければ書き込む前に切り替える
     private let timeNeededForTransfer: Duration = .seconds(9)
     /// 1 回の書き込みでセッションを切り替える回数の上限
@@ -96,7 +109,7 @@ final class WriteController: ObservableObject {
         sessionSwitches = 0
         append("書き込み #\(runNumber) / iOS \(UIDevice.current.systemVersion) / \(deviceModel())"
                + " / 画素の並び \(layout.rawValue) / 切れたらつなぎ直す \(reconnectOnLoss ? "はい" : "いいえ")"
-               + " / 上限前にセッション切り替え \(switchSessionBeforeLimit ? "はい" : "いいえ")")
+               + " / 描画中の待ち方 \(refreshStrategy.rawValue)")
 
         guard beginSession(message: "EZ Sign にタッチしてください") else {
             phase = .failed("NFC セッションを作れませんでした")
@@ -142,7 +155,7 @@ final class WriteController: ObservableObject {
         var attempt = 1
         while true {
             let proto = makeProtocol(try await waitForTag())
-            if switchSessionBeforeLimit, let remaining = remainingSessionTime(), remaining < timeNeededForTransfer {
+            if refreshStrategy == .switchSession, let remaining = remainingSessionTime(), remaining < timeNeededForTransfer {
                 // 描画に入る前に打ち切られないよう、書き込む前に新しいセッションにする
                 try switchSession(reason: "セッションの残りが \(formatSeconds(remaining)) 秒で、転送には足りない")
                 continue
@@ -187,11 +200,14 @@ final class WriteController: ObservableObject {
         }
     }
 
-    /// 描画が終わるまで POLL する。セッションの上限が近づいたら新しいセッションに切り替え、
-    /// 通信が一時的に切れたら同じセッションでつなぎ直して、続きを待つ。
+    /// 描画が終わるまで待つ。待ち方は refreshStrategy で選ぶ。
+    /// - 静かに待つ: 接続が切られる前に POLL をやめ、セッションは開いたまま REFRESH から
+    ///   expectedRefreshTime まで待つ。そのあと POLL し、接続が切れていれば同じセッションでつなぎ直す
+    /// - セッション切り替え: 上限の前に新しいセッションへ切り替えて、続きを POLL する
     private func waitUntilDrawn(_ first: EZSignProtocol, refreshStart: ContinuousClock.Instant) async throws -> Double {
         var proto = first
         var reconnect: Reconnect?
+        var waitedQuietly = false
         phase = .refreshing(seconds: 0)
         session?.alertMessage = "描画中です。動かさないでください"
         while true {
@@ -202,26 +218,48 @@ final class WriteController: ObservableObject {
                 }
                 let result = try await proto.waitForRefresh(
                     startedAt: refreshStart,
-                    pauseWhen: { [weak self] in self?.isNearSessionLimit() ?? false },
+                    pauseWhen: { [weak self] in !waitedQuietly && (self?.isNearSessionLimit() ?? false) },
                     progress: { [weak self] elapsed in self?.showRefreshing(elapsed) })
                 switch result {
                 case let .done(elapsed):
                     return elapsed.seconds
                 case .paused:
-                    try switchSession(reason: "セッションの上限が近い（REFRESH から "
-                                      + "\(formatSeconds(ContinuousClock.now - refreshStart)) 秒）")
-                    reconnect = .newSession
+                    switch refreshStrategy {
+                    case .quietWait:
+                        try await waitQuietly(refreshStart: refreshStart)
+                        waitedQuietly = true
+                        // このまま同じ接続で POLL する。切られていれば下の catch でつなぎ直す
+                    case .switchSession:
+                        try switchSession(reason: "セッションの上限が近い（REFRESH から "
+                                          + "\(formatSeconds(ContinuousClock.now - refreshStart)) 秒）")
+                        reconnect = .newSession
+                    }
                 }
-            } catch where reconnectOnLoss && isTagLost(error) {
+            } catch where reconnectOnLoss && (isTagLost(error) || (refreshStrategy == .quietWait && isConnectionInvalidated(error))) {
                 append("描画中に接続が切れました: \(describe(error))（REFRESH から "
                        + "\(formatSeconds(ContinuousClock.now - refreshStart)) 秒、\(connectionAgeText())）。同じセッションでつなぎ直します")
                 reconnect = .sameSession
-            } catch where switchSessionBeforeLimit && isSessionEnding(error) && isNearSessionLimit(margin: .seconds(3)) {
+            } catch where refreshStrategy == .switchSession && isSessionEnding(error) && isNearSessionLimit(margin: .seconds(3)) {
                 // 見込みより早く打ち切られた場合。利用者のキャンセルと区別するため、上限の近くだけ
                 try switchSession(reason: "描画中にセッションが終わった（\(describe(error))）")
                 reconnect = .newSession
             }
         }
+    }
+
+    /// POLL を止め、セッションには触らずに（電波は出たままのはず）描画が終わる見込みの時刻まで待つ。
+    private func waitQuietly(refreshStart: ContinuousClock.Instant) async throws {
+        let until = refreshStart + expectedRefreshTime
+        append("POLL をやめて、REFRESH から \(formatSeconds(expectedRefreshTime)) 秒まで静かに待ちます"
+               + "（\(connectionAgeText())、このセッションの開始から \(sessionAgeText())）")
+        while ContinuousClock.now < until {
+            // 待っている間にセッションが終わったら（didInvalidate で記録される）、続けられない
+            guard session != nil else { throw WriteFailure.sessionClosed }
+            showRefreshing(ContinuousClock.now - refreshStart)
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        guard session != nil else { throw WriteFailure.sessionClosed }
+        append("待ち終わり。完了を確かめます（\(connectionAgeText())、このセッションの開始から \(sessionAgeText())）")
     }
 
     /// 描画中につなぎ直し、POLL を続けられる状態にする。
@@ -303,7 +341,7 @@ final class WriteController: ObservableObject {
     }
 
     private func isNearSessionLimit(margin: Duration) -> Bool {
-        guard switchSessionBeforeLimit, let remaining = remainingSessionTime() else { return false }
+        guard let remaining = remainingSessionTime() else { return false }
         return remaining <= margin
     }
 
@@ -416,6 +454,12 @@ final class WriteController: ObservableObject {
         let nsError = error as NSError
         // 100 接続が切れた / 101 再送の上限 / 102 タグの応答エラー / 104 つながっていない
         return nsError.domain == NFCErrorDomain && [100, 101, 102, 104].contains(nsError.code)
+    }
+
+    /// 接続が打ち切られたエラーか（103。1 回目の実機ではこの後もセッションは生きていた）。
+    private func isConnectionInvalidated(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NFCErrorDomain && nsError.code == 103
     }
 
     /// セッションそのものが終わったエラーか。
