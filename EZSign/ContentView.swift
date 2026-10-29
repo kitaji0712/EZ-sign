@@ -36,10 +36,12 @@ struct ContentView: View {
                         }
                     }
                     Toggle("切れたらつなぎ直す", isOn: $controller.reconnectOnLoss)
+                    Toggle("接続 17 秒で先につなぎ直す", isOn: $controller.reconnectBeforeLimit)
                 } header: {
                     Text("設定")
                 } footer: {
-                    Text("4.2 インチは row-mirror のはずです。左右反転や崩れた表示になったら変えて試してください。")
+                    Text("4.2 インチは row-mirror で正しく表示されることを確認済みです。"
+                         + "iPhone は接続を約 20 秒で切るので、描画の途中でつなぎ直します。")
                 }
                 .disabled(controller.phase.isRunning)
 

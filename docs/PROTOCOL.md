@@ -48,4 +48,26 @@ Santek EZ Sign（NFC モデル）は ISO 14443-4（ISO-DEP）のタグとして�
 - `NFCTagReaderSession` を `.iso14443` で使います。entitlements の `com.apple.developer.nfc.readersession.formats` は `TAG` だけにします。
 - Info.plist の `com.apple.developer.nfc.readersession.iso7816.select-identifiers` に `D2760000850101` を入れると、iOS が検出時にその AID を SELECT し、`NFCISO7816Tag` として渡してくれます。
 - NFC の機能は有料の Apple Developer Program でしか使えません（無料の Personal Team では不可）。
-- 1 つのセッションは約 60 秒まで、タグとの接続は約 20 秒までという報告があります（[Apple Developer Forums](https://developer.apple.com/forums/thread/802895)）。4.2 インチは転送と描画で 25〜30 秒かかります。ただし公式アプリは iPhone で 30 秒以上かけて書き込めているので、何らかの方法で続けられるはずです。テストアプリは、接続が切れたら同じセッションでつなぎ直して POLL を続けます。実際にどうなるかは実機のログで確かめます。
+- 1 つのセッションは約 60 秒まで、タグとの接続は約 20 秒までという報告があります（[Apple Developer Forums](https://developer.apple.com/forums/thread/802895)）。公式アプリは iPhone で 30 秒以上かけて書き込めているので、何らかの方法で続けられるはずです。
+
+### 実機の結果（2026-10-29、iPhone18,3 / iOS 27.0、4.2 インチ）
+
+1 回目の書き込みでは次のようになりました。
+
+| 項目 | 結果 |
+|---|---|
+| タグの見え方 | ISO 7816（AID `D2760000850101`）。検出まで 0.5 秒 |
+| 位置確認（SELECT × 8） | 応答 平均 6 ms / 最大 7 ms |
+| SELECT / VERIFY / INIT | すべて `90 00`。INIT の `A0` から 4.2 インチと判別できた |
+| DATA × 120 | 1 回 35 ms、合計 4.4 秒 |
+| REFRESH | 応答まで 1.2 秒 |
+| POLL | REFRESH から 13.4 秒まで `01`（描画中） |
+| 切断 | **接続から 20.5 秒で POLL が NFCError 103（Session invalidated）** |
+| パネル | 描画の途中で止まった。配置は正しく、左右反転もなし（`row-mirror` で正しい） |
+
+接続から REFRESH までに約 7 秒、描画に約 24 秒かかるので、1 回の接続（約 20 秒）では描画が終わりません。そこでテストアプリは次のようにしています。
+
+- 描画中、接続から 17 秒たったら POLL を止め、`restartPolling()` で同じ EZ Sign をもう一度検出して接続し直す（新しい 20 秒が始まる）。つなぎ直した直後は POLL を送り、通らなければ SELECT / VERIFY からやり直す
+- 切られてしまった場合（103 を含む）も同じようにつなぎ直す
+
+つなぎ直しの間にパネルへの給電が途切れて描画が止まらないかは、次の実機テストで確かめます。

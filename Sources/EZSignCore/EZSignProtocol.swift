@@ -3,6 +3,14 @@ protocol APDUTransport {
     func send(_ apdu: [UInt8]) async throws -> APDUResponse
 }
 
+/// waitForRefresh の結果。
+enum RefreshWait: Equatable {
+    /// 描画完了。REFRESH からの経過時間
+    case done(Duration)
+    /// pauseWhen が true を返したので POLL を止めた（パネルの描画は続いている）
+    case paused
+}
+
 enum EZSignError: Error, Equatable, CustomStringConvertible {
     /// 状態語が 90 00 以外だった
     case rejected(step: String, status: String)
@@ -23,7 +31,8 @@ enum EZSignError: Error, Equatable, CustomStringConvertible {
 ///
 /// 1 回の書き込みは checkPlacement → begin → sendFrame → startRefresh → waitForRefresh の順に呼ぶ。
 /// 通信エラーはそのまま投げるので、呼び出し側でタグにつなぎ直してから
-/// resumeAfterReconnect → waitForRefresh で続きを待てる。
+/// resumeAfterReconnect → waitForRefresh で続きを待てる。waitForRefresh を pauseWhen で
+/// 止めた（.paused）ときも同じ手順で続ける。
 ///
 /// 各メソッドは呼び出し元のアクターで動く（isolation 引数）。
 /// メインアクターから呼べば log や progress もメインアクターで呼ばれる。
@@ -88,18 +97,24 @@ struct EZSignProtocol {
         try await sleep(refreshSettleTime)
     }
 
-    /// 描画が終わるまで POLL を繰り返す。start は REFRESH を送った時刻。
-    /// 終わったら REFRESH からの経過時間を返す。progress には経過時間を渡す。
+    /// 描画が終わるまで POLL を繰り返す。start は REFRESH を送った時刻。progress には経過時間を渡す。
+    /// POLL の前に毎回 pauseWhen を呼び、true なら POLL を止めて .paused を返す
+    /// （iPhone の接続時間の上限が来る前につなぎ直すため）。
     @discardableResult
     func waitForRefresh(startedAt start: ContinuousClock.Instant, timeout: Duration = .seconds(60),
+                        pauseWhen shouldPause: () -> Bool = { false },
                         progress: (Duration) -> Void = { _ in },
-                        isolation: isolated (any Actor)? = #isolation) async throws -> Duration {
+                        isolation: isolated (any Actor)? = #isolation) async throws -> RefreshWait {
         var polls = 0
         var lastStatus: [UInt8]?
         while true {
             let elapsed = clock.now - start
             if elapsed > timeout {
                 throw EZSignError.refreshTimedOut(seconds: elapsed.seconds)
+            }
+            if shouldPause() {
+                log("POLL を一時停止（REFRESH から \(formatSeconds(elapsed)) 秒、POLL \(polls) 回）")
+                return .paused
             }
             let response = try await exchange(EZSignCommand.poll, step: "POLL", quiet: true)
             polls += 1
@@ -111,7 +126,7 @@ struct EZSignProtocol {
             }
             if status == [0x00] {
                 log("描画完了（REFRESH から \(formatSeconds(elapsed)) 秒、POLL \(polls) 回）")
-                return elapsed
+                return .done(elapsed)
             }
             progress(elapsed)
             try await sleep(pollInterval)

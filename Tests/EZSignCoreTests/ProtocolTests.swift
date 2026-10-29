@@ -99,8 +99,9 @@ final class ProtocolTests: XCTestCase {
         var lastProgress = (0, 0)
         try await proto.sendFrame(frame, progress: { lastProgress = ($0, $1) })
         try await proto.startRefresh()
-        try await proto.waitForRefresh(startedAt: ContinuousClock.now)
+        let result = try await proto.waitForRefresh(startedAt: ContinuousClock.now)
 
+        guard case .done = result else { return XCTFail("描画完了になっていない: \(result)") }
         XCTAssertEqual(tag.received, frame)
         XCTAssertEqual(lastProgress.0, 120)
         XCTAssertEqual(lastProgress.1, 120)
@@ -109,6 +110,33 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(tag.sent[4 + 120], EZSignCommand.refresh)
         XCTAssertEqual(tag.sent.last, EZSignCommand.poll)
         XCTAssertEqual(tag.sent.count, 4 + 120 + 1 + 3)
+    }
+
+    func testWaitForRefreshPausesWithoutFurtherPolls() async throws {
+        let tag = FakeTag(pollsUntilReady: .max)
+        let proto = makeProtocol(tag)
+        var checks = 0
+        // 3 回目の確認で止める → POLL は 2 回だけ
+        let result = try await proto.waitForRefresh(startedAt: ContinuousClock.now, pauseWhen: {
+            checks += 1
+            return checks >= 3
+        })
+        XCTAssertEqual(result, .paused)
+        XCTAssertEqual(tag.sent, [EZSignCommand.poll, EZSignCommand.poll])
+    }
+
+    func testRefreshCanContinueAfterPause() async throws {
+        let tag = FakeTag(pollsUntilReady: 4)
+        let proto = makeProtocol(tag)
+        let start = ContinuousClock.now
+        // POLL を 2 回送ったところで止める
+        let first = try await proto.waitForRefresh(startedAt: start, pauseWhen: { tag.sent.count == 2 })
+        XCTAssertEqual(first, .paused)
+        // つなぎ直したつもりで続きを待つ
+        try await proto.resumeAfterReconnect()
+        let second = try await proto.waitForRefresh(startedAt: start)
+        guard case .done = second else { return XCTFail("描画完了になっていない: \(second)") }
+        XCTAssertEqual(tag.sent, Array(repeating: EZSignCommand.poll, count: 4))
     }
 
     func testPlacementCheckSendsOnlySelectProbes() async throws {

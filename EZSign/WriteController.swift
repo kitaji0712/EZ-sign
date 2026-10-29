@@ -35,6 +35,13 @@ final class WriteController: ObservableObject {
         didSet { preview = makePattern() }
     }
     @Published var reconnectOnLoss = true
+    @Published var reconnectBeforeLimit = true
+
+    /// iPhone はタグとの接続を約 20 秒で切る（実機で接続から 20.5 秒で NFCError 103）。
+    /// 描画（約 24 秒）の途中で切られないよう、この時間がたったら自分からつなぎ直す。
+    private let reconnectAge: Duration = .seconds(17)
+    /// 描画中につなぎ直すとき、EZ Sign がもう一度見つかるまで待つ上限
+    private let reconnectTimeout: Duration = .seconds(5)
 
     private let delegate = SessionDelegate()
     private var session: NFCTagReaderSession?
@@ -43,6 +50,8 @@ final class WriteController: ObservableObject {
     private var connectedAt: ContinuousClock.Instant?
     /// タグが見つかるのを待っている処理
     private var tagWaiter: CheckedContinuation<NFCTag, Error>?
+    /// 待ち時間切れの判定で、どの待ちかを見分ける番号
+    private var tagWaiterToken = 0
     /// 誰も待っていないときに見つかったタグ
     private var detectedTag: NFCTag?
 
@@ -65,7 +74,8 @@ final class WriteController: ObservableObject {
         connectedAt = nil
         detectedTag = nil
         append("書き込み #\(runNumber) / iOS \(UIDevice.current.systemVersion) / \(deviceModel())"
-               + " / 画素の並び \(layout.rawValue) / つなぎ直し \(reconnectOnLoss ? "する" : "しない")")
+               + " / 画素の並び \(layout.rawValue) / 切れたらつなぎ直す \(reconnectOnLoss ? "はい" : "いいえ")"
+               + " / \(Int(reconnectAge.seconds)) 秒でつなぎ直す \(reconnectBeforeLimit ? "はい" : "いいえ")")
 
         guard let session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: delegate) else {
             phase = .failed("NFC セッションを作れませんでした")
@@ -154,27 +164,54 @@ final class WriteController: ObservableObject {
         }
     }
 
-    /// 描画が終わるまで POLL する。切れたらつなぎ直して続きを待つ。
+    /// 描画が終わるまで POLL する。接続時間の上限が近づいたら自分からつなぎ直し、
+    /// 切られた場合もつなぎ直して続きを待つ。
     private func waitUntilDrawn(_ first: EZSignProtocol, refreshStart: ContinuousClock.Instant) async throws -> Double {
         var proto = first
+        var needsReconnect = false
         phase = .refreshing(seconds: 0)
         session?.alertMessage = "描画中です。動かさないでください"
         while true {
             do {
-                let elapsed = try await proto.waitForRefresh(startedAt: refreshStart, progress: { [weak self] elapsed in
-                    self?.showRefreshing(elapsed)
-                })
-                return elapsed.seconds
+                if needsReconnect {
+                    proto = try await reconnectDuringRefresh(refreshStart: refreshStart)
+                    needsReconnect = false
+                }
+                let result = try await proto.waitForRefresh(
+                    startedAt: refreshStart,
+                    pauseWhen: { [weak self] in self?.isConnectionNearLimit() ?? false },
+                    progress: { [weak self] elapsed in self?.showRefreshing(elapsed) })
+                switch result {
+                case let .done(elapsed):
+                    return elapsed.seconds
+                case .paused:
+                    append("\(connectionAgeText())。切られる前につなぎ直します")
+                    needsReconnect = true
+                }
             } catch where reconnectOnLoss && isTagLost(error) {
-                append("描画中に接続が切れました（REFRESH から \(formatSeconds(ContinuousClock.now - refreshStart)) 秒、"
-                       + "\(connectionAgeText())）。つなぎ直します")
-                phase = .reconnecting
-                session?.alertMessage = "そのまま動かさないでください"
-                session?.restartPolling()
-                proto = makeProtocol(try await waitForTag())
-                try await proto.resumeAfterReconnect()
+                append("描画中に接続が切れました: \(describe(error))（REFRESH から "
+                       + "\(formatSeconds(ContinuousClock.now - refreshStart)) 秒、\(connectionAgeText())）。つなぎ直します")
+                needsReconnect = true
             }
         }
+    }
+
+    /// 描画中につなぎ直す。restartPolling で同じ EZ Sign をもう一度見つけて接続し、POLL を続けられる状態にする。
+    private func reconnectDuringRefresh(refreshStart: ContinuousClock.Instant) async throws -> EZSignProtocol {
+        phase = .reconnecting
+        session?.alertMessage = "そのまま動かさないでください"
+        let start = ContinuousClock.now
+        session?.restartPolling()
+        let proto = makeProtocol(try await waitForTag(timeout: reconnectTimeout))
+        append("つなぎ直しにかかった時間: \(Int((ContinuousClock.now - start).seconds * 1000)) ms"
+               + "（REFRESH から \(formatSeconds(ContinuousClock.now - refreshStart)) 秒）")
+        try await proto.resumeAfterReconnect()
+        return proto
+    }
+
+    private func isConnectionNearLimit() -> Bool {
+        guard reconnectBeforeLimit, let connectedAt else { return false }
+        return ContinuousClock.now - connectedAt >= reconnectAge
     }
 
     private func showRefreshing(_ elapsed: Duration) {
@@ -190,7 +227,8 @@ final class WriteController: ObservableObject {
 
     // MARK: - タグの検出と接続
 
-    private func waitForTag() async throws -> APDUTransport {
+    /// EZ Sign が見つかるのを待って接続する。timeout を渡すと、その時間内に見つからなければ失敗する。
+    private func waitForTag(timeout: Duration? = nil) async throws -> APDUTransport {
         while true {
             // セッションが終わっていたら、タグはもう来ない
             guard session != nil else { throw WriteFailure.sessionClosed }
@@ -199,6 +237,14 @@ final class WriteController: ObservableObject {
                 detectedTag = nil
                 tag = pending
             } else {
+                tagWaiterToken += 1
+                if let timeout {
+                    let token = tagWaiterToken
+                    Task { [weak self] in
+                        try? await Task.sleep(for: timeout)
+                        self?.expireTagWaiter(token)
+                    }
+                }
                 tag = try await withCheckedThrowingContinuation { tagWaiter = $0 }
             }
             do {
@@ -210,6 +256,14 @@ final class WriteController: ObservableObject {
                 session?.restartPolling()
             }
         }
+    }
+
+    /// 待ち時間切れ。token の待ちがまだ続いていれば失敗させる。
+    private func expireTagWaiter(_ token: Int) {
+        guard token == tagWaiterToken, let waiter = tagWaiter else { return }
+        tagWaiter = nil
+        append("EZ Sign が見つからないまま待ち時間を過ぎました")
+        waiter.resume(throwing: WriteFailure.tagNotFound)
     }
 
     private func connect(_ tag: NFCTag) async throws -> APDUTransport {
@@ -274,8 +328,10 @@ final class WriteController: ObservableObject {
     /// つなぎ直せば続けられそうな通信エラーか。
     private func isTagLost(_ error: Error) -> Bool {
         let nsError = error as NSError
-        // 100 接続が切れた / 101 再送の上限 / 102 タグの応答エラー / 104 つながっていない
-        return nsError.domain == NFCErrorDomain && [100, 101, 102, 104].contains(nsError.code)
+        // 100 接続が切れた / 101 再送の上限 / 102 タグの応答エラー / 104 つながっていない /
+        // 103 セッション無効（実機では接続から 20.5 秒でこれが返った。本当にセッションが終わっていれば、
+        // つなぎ直しは waitForTag の sessionClosed か待ち時間切れで止まる）
+        return nsError.domain == NFCErrorDomain && [100, 101, 102, 103, 104].contains(nsError.code)
     }
 
     private func describe(_ error: Error) -> String {

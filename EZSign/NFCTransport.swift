@@ -52,6 +52,7 @@ enum WriteFailure: Error, CustomStringConvertible {
     case unsupportedModel(String)
     case malformedAPDU(String)
     case sessionClosed
+    case tagNotFound
 
     var description: String {
         switch self {
@@ -59,6 +60,7 @@ enum WriteFailure: Error, CustomStringConvertible {
         case let .unsupportedModel(name): return "\(name) のパネルにはまだ対応していません（4.2 インチのみ）"
         case let .malformedAPDU(head): return "APDU を作れませんでした（\(head)…）"
         case .sessionClosed: return "NFC セッションが終了しています"
+        case .tagNotFound: return "つなぎ直そうとしましたが、EZ Sign が見つかりませんでした"
         }
     }
 }
