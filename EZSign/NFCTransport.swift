@@ -53,6 +53,7 @@ enum WriteFailure: Error, CustomStringConvertible {
     case malformedAPDU(String)
     case sessionClosed
     case tagNotFound
+    case tooManySessionSwitches
 
     var description: String {
         switch self {
@@ -61,6 +62,7 @@ enum WriteFailure: Error, CustomStringConvertible {
         case let .malformedAPDU(head): return "APDU を作れませんでした（\(head)…）"
         case .sessionClosed: return "NFC セッションが終了しています"
         case .tagNotFound: return "つなぎ直そうとしましたが、EZ Sign が見つかりませんでした"
+        case .tooManySessionSwitches: return "NFC セッションの切り替えが多すぎます"
         }
     }
 }

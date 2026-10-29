@@ -36,12 +36,13 @@ struct ContentView: View {
                         }
                     }
                     Toggle("切れたらつなぎ直す", isOn: $controller.reconnectOnLoss)
-                    Toggle("接続 17 秒で先につなぎ直す", isOn: $controller.reconnectBeforeLimit)
+                    Toggle("約 20 秒の上限前にセッションを切り替える", isOn: $controller.switchSessionBeforeLimit)
                 } header: {
                     Text("設定")
                 } footer: {
                     Text("4.2 インチは row-mirror で正しく表示されることを確認済みです。"
-                         + "iPhone は接続を約 20 秒で切るので、描画の途中でつなぎ直します。")
+                         + "iPhone は NFC のセッションを約 20 秒で打ち切るので、描画の途中で新しいセッションに切り替えます"
+                         + "（読み取り画面が一度閉じて、また開きます）。")
                 }
                 .disabled(controller.phase.isRunning)
 
