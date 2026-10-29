@@ -12,12 +12,17 @@ final class FakeTag: APDUTransport {
     var rejectedPolls = 0
     var initReply: [UInt8] = Array(hex: "A007F0072002580190")
     var replies: [[UInt8]: APDUResponse] = [:]
+    /// この回数だけ送ったら、それ以降は通信エラーにする（位置がずれた想定）
+    var connectionLostAfter: Int?
+
+    struct ConnectionLost: Error {}
 
     init(pollsUntilReady: Int = 3) {
         self.pollsUntilReady = pollsUntilReady
     }
 
     func send(_ apdu: [UInt8]) async throws -> APDUResponse {
+        if let limit = connectionLostAfter, sent.count >= limit { throw ConnectionLost() }
         sent.append(apdu)
         if let reply = replies[apdu] { return reply }
         switch apdu {
@@ -104,6 +109,37 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(tag.sent[4 + 120], EZSignCommand.refresh)
         XCTAssertEqual(tag.sent.last, EZSignCommand.poll)
         XCTAssertEqual(tag.sent.count, 4 + 120 + 1 + 3)
+    }
+
+    func testPlacementCheckSendsOnlySelectProbes() async throws {
+        let tag = FakeTag()
+        try await makeProtocol(tag).checkPlacement(probes: 8)
+        XCTAssertEqual(tag.sent, Array(repeating: EZSignCommand.select, count: 8))
+    }
+
+    func testPlacementCheckFailsWhenAProbeIsRejected() async {
+        let tag = FakeTag()
+        tag.replies[EZSignCommand.select] = APDUResponse(sw1: 0x6A, sw2: 0x82)
+        do {
+            try await makeProtocol(tag).checkPlacement()
+            XCTFail("拒否されたのに位置確認が通った")
+        } catch let error as EZSignError {
+            XCTAssertEqual(error, .rejected(step: "位置確認 SELECT", status: "6A 82"))
+        } catch {
+            XCTFail("想定外のエラー: \(error)")
+        }
+    }
+
+    func testPlacementCheckFailsWhenConnectionDrops() async {
+        let tag = FakeTag()
+        tag.connectionLostAfter = 3
+        do {
+            try await makeProtocol(tag).checkPlacement(probes: 8)
+            XCTFail("途中で切れたのに位置確認が通った")
+        } catch {
+            XCTAssertTrue(error is FakeTag.ConnectionLost)
+            XCTAssertEqual(tag.sent.count, 3)
+        }
     }
 
     func testVerifyIsRetriedOnce() async throws {

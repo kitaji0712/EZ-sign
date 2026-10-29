@@ -21,7 +21,7 @@ enum EZSignError: Error, Equatable, CustomStringConvertible {
 
 /// EZ Sign への書き込み手順（docs/PROTOCOL.md）。
 ///
-/// 1 回の書き込みは begin → sendFrame → startRefresh → waitForRefresh の順に呼ぶ。
+/// 1 回の書き込みは checkPlacement → begin → sendFrame → startRefresh → waitForRefresh の順に呼ぶ。
 /// 通信エラーはそのまま投げるので、呼び出し側でタグにつなぎ直してから
 /// resumeAfterReconnect → waitForRefresh で続きを待てる。
 ///
@@ -40,6 +40,23 @@ struct EZSignProtocol {
     init(transport: APDUTransport, log: @escaping (String) -> Void = { _ in }) {
         self.transport = transport
         self.log = log
+    }
+
+    /// 書き込みの前に、当てた位置で通信が安定しているかを確かめる。
+    /// 無害な SELECT を何回か送り、全部 90 00 で返ってくれば OK。だめなら投げる
+    /// （拒否は EZSignError、通信エラーはそのまま）。
+    /// これはこのアプリ独自の確認で、公式アプリの確認方法は分かっていない。
+    func checkPlacement(probes: Int = 8, interval: Duration = .milliseconds(100),
+                        isolation: isolated (any Actor)? = #isolation) async throws {
+        var milliseconds: [Int] = []
+        for _ in 0..<probes {
+            let start = clock.now
+            try await exchange(EZSignCommand.select, step: "位置確認 SELECT", requireOK: true, quiet: true)
+            milliseconds.append(Int((clock.now - start).seconds * 1000))
+            try await sleep(interval)
+        }
+        let average = milliseconds.reduce(0, +) / max(milliseconds.count, 1)
+        log("位置確認 OK: \(probes) 回とも応答（平均 \(average) ms / 最大 \(milliseconds.max() ?? 0) ms）")
     }
 
     /// SELECT → VERIFY → SELECT → INIT。INIT の応答の機種情報を返す。

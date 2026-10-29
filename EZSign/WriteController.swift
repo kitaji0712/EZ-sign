@@ -12,6 +12,7 @@ final class WriteController: ObservableObject {
     enum Phase: Equatable {
         case idle
         case waitingForTag
+        case checkingPlacement
         case authenticating
         case sending(sent: Int, total: Int)
         case refreshing(seconds: Int)
@@ -70,7 +71,7 @@ final class WriteController: ObservableObject {
             phase = .failed("NFC セッションを作れませんでした")
             return
         }
-        session.alertMessage = "iPhone の上部を EZ Sign の中央に当てて、終わるまで動かさないでください"
+        session.alertMessage = "iPhone の上部を EZ Sign の NFC の位置に当ててください"
         self.session = session
         phase = .waitingForTag
         session.begin()
@@ -107,11 +108,26 @@ final class WriteController: ObservableObject {
         return try await waitUntilDrawn(proto, refreshStart: refreshStart)
     }
 
-    /// 認証して画像を送り、REFRESH まで。途中で切れたら最初からやり直す（2 回まで）。
+    /// 位置を確認してから、認証して画像を送り、REFRESH まで。
+    /// 位置確認が通らなければ書き込まずに当て直してもらう。送信中に切れたら最初からやり直す（2 回まで）。
     private func transfer(_ bytes: [UInt8]) async throws -> (EZSignProtocol, ContinuousClock.Instant) {
         var attempt = 1
         while true {
             let proto = makeProtocol(try await waitForTag())
+            phase = .checkingPlacement
+            session?.alertMessage = "位置を確認しています。そのまま動かさないでください"
+            do {
+                try await proto.checkPlacement()
+            } catch let error as WriteFailure {
+                throw error
+            } catch {
+                append("位置確認で失敗: \(describe(error))。書き込まずに当て直してもらいます")
+                phase = .waitingForTag
+                session?.alertMessage = "うまく通信できませんでした。当てる位置を合わせて、もう一度かざしてください"
+                session?.restartPolling()
+                continue
+            }
+            session?.alertMessage = "位置 OK。書き込みを始めます。動かさないでください"
             do {
                 phase = .authenticating
                 let info = try await proto.begin()
@@ -176,6 +192,8 @@ final class WriteController: ObservableObject {
 
     private func waitForTag() async throws -> APDUTransport {
         while true {
+            // セッションが終わっていたら、タグはもう来ない
+            guard session != nil else { throw WriteFailure.sessionClosed }
             let tag: NFCTag
             if let pending = detectedTag {
                 detectedTag = nil
@@ -302,6 +320,7 @@ extension WriteController.Phase {
         switch self {
         case .idle: return "待機中"
         case .waitingForTag: return "EZ Sign にかざしてください"
+        case .checkingPlacement: return "位置を確認中（動かさないでください）"
         case .authenticating: return "認証中"
         case let .sending(sent, total): return "送信中 \(sent) / \(total)"
         case let .refreshing(seconds): return "描画中 \(seconds) 秒（動かさないでください）"
