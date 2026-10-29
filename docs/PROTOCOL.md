@@ -46,7 +46,7 @@ Santek EZ Sign（NFC モデル）は ISO 14443-4（ISO-DEP）のタグとして�
 ## iPhone（Core NFC）での注意
 
 - `NFCTagReaderSession` を `.iso14443` で使います。entitlements の `com.apple.developer.nfc.readersession.formats` は `TAG` だけにします。
-- Info.plist の `com.apple.developer.nfc.readersession.iso7816.select-identifiers` に `D2760000850101` を入れると、iOS が検出時にその AID を SELECT し、`NFCISO7816Tag` として渡してくれます。（今は 4 回目の実験のため外しています。下を参照）
+- Info.plist の `com.apple.developer.nfc.readersession.iso7816.select-identifiers` に `D2760000850101` を入れると、iOS が検出時にその AID を SELECT し、`NFCISO7816Tag` として渡してくれます。書かないと、EZ Sign は MIFARE としても渡されず、検出されません（4 回目の実験）。
 - NFC の機能は有料の Apple Developer Program でしか使えません（無料の Personal Team では不可）。
 - 1 つのセッションは約 60 秒まで、タグとの接続は約 20 秒までという報告があります（[Apple Developer Forums](https://developer.apple.com/forums/thread/802895)）。公式アプリは iPhone で 30 秒以上かけて書き込めているので、何らかの方法で続けられるはずです。
 
@@ -96,12 +96,20 @@ Santek EZ Sign（NFC モデル）は ISO 14443-4（ISO-DEP）のタグとして�
 
 REFRESH のあと約 24 秒、電波を途切れさせずに出し続ける必要がありますが、1 つの接続では約 13〜14 秒しか確保できません。
 
-### 4 回目の実験: MIFARE タグとして受け取る
+### 4 回目の実験: MIFARE タグとして受け取る（結果: 検出されない）
 
-公式アプリは認識から % が出るまで遅いので、このアプリとは違う方式でタグとつないでいる可能性があります。そこで Info.plist から AID（`D2760000850101`）を外しました。こうすると iOS は EZ Sign を `NFCMiFareTag` として渡します。この方式でも接続から約 20 秒の上限がかかるかを確かめます。
+公式アプリは認識から % が出るまで遅いので、このアプリとは違う方式でタグとつないでいる可能性があります。そこで Info.plist から AID（`D2760000850101`）を外し、`NFCMiFareTag` として受け取れるかを試しました。
 
-- 送り方: family が Plus / DESFire なら `sendMiFareISO7816Command`、それ以外（unknown）は APDU のバイト列をそのまま `sendMiFareCommand` で送り、応答の末尾 2 バイトを SW1 SW2 とする。最初の 1 回が通信以外の理由で失敗したら、もう一方の送り方を試す
-- 描画中の待ち方は「POLL し続ける」（既定）。上限がかかればそのときの時刻とエラーがログに出る
-- ISO 7816 に戻すには、Info.plist に `com.apple.developer.nfc.readersession.iso7816.select-identifiers` = [`D2760000850101`] を戻す
+結果は、読み取り画面が「タッチしてください」のまま進まず、**EZ Sign は検出されませんでした**。iOS は、AID が合わない ISO 14443-4 のタグを MIFARE としても渡さないようです。AID は元に戻しました（MiFareTransport のコードは残してある）。
 
-描画中の待ち方は、ほかに「静かに待つ」（接続の上限の 1.5 秒前に POLL をやめ、REFRESH から 26 秒まで待ってから確かめる）と「セッション切り替え」（上限の前に新しいセッションへ切り替える）も選べます。どの方式でも、通信が一時的に切れた場合（100 / 101 / 102 / 104）は、同じセッションで `restartPolling()` してつなぎ直します。
+### 5 回目の実験: NDEF セッションで受け取る
+
+公式アプリの「認識してから転送を始めるまでが遅い」は、NDEF 用の読み取りセッション（`NFCNDEFReaderSession`）を使い、タグの NDEF を読んでからつないでいる、と考えると説明がつきます。NDEF セッションにも接続から約 20 秒の上限がかかるかは分かっていません。
+
+アプリの「NDEF セッションで書き込む（実験）」ボタンで、次を行います。
+
+- `NFCNDEFReaderSession(invalidateAfterFirstRead: false)` で EZ Sign を見つけて接続する
+- `queryNDEFStatus` と `readNDEF` で、パネルの NDEF の状態・容量・中身をログに残す
+- タグが `NFCISO7816Tag` としても使えれば、いつもの手順で書き込み、描画が終わるまで POLL し続ける
+
+描画中の待ち方（いつものボタン）は、「POLL し続ける」（既定）、「静かに待つ」（接続の上限の 1.5 秒前に POLL をやめ、REFRESH から 26 秒まで待ってから確かめる）、「セッション切り替え」（上限の前に新しいセッションへ切り替える）から選べます。どの方式でも、通信が一時的に切れた場合（100 / 101 / 102 / 104）は、同じセッションで `restartPolling()` してつなぎ直します。

@@ -22,6 +22,15 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(controller.phase.isRunning)
 
+                    Button {
+                        controller.startNDEFExperiment()
+                    } label: {
+                        Label("NDEF セッションで書き込む（実験）", systemImage: "flask")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(controller.phase.isRunning)
+
                     Text(controller.phase.title)
                         .foregroundStyle(statusColor)
                     if case let .sending(sent, total) = controller.phase {

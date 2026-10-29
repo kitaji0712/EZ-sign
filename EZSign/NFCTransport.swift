@@ -109,6 +109,29 @@ final class SessionDelegate: NSObject, NFCTagReaderSessionDelegate {
     }
 }
 
+/// NDEF セッション（実験）のデリゲート。受け取ったものを WriteController に渡すだけ。
+final class NDEFSessionDelegate: NSObject, NFCNDEFReaderSessionDelegate {
+    weak var controller: WriteController?
+
+    func readerSessionDidBecomeActive(_ session: NFCNDEFReaderSession) {
+        let controller = self.controller
+        Task { @MainActor in controller?.ndefSessionDidBecomeActive(session) }
+    }
+
+    func readerSession(_ session: NFCNDEFReaderSession, didInvalidateWithError error: Error) {
+        let controller = self.controller
+        Task { @MainActor in controller?.ndefSession(session, didInvalidateWith: error) }
+    }
+
+    /// didDetect tags を実装しているので呼ばれない（プロトコルで必須なので置いておく）
+    func readerSession(_ session: NFCNDEFReaderSession, didDetectNDEFs messages: [NFCNDEFMessage]) {}
+
+    func readerSession(_ session: NFCNDEFReaderSession, didDetect tags: [NFCNDEFTag]) {
+        let controller = self.controller
+        Task { @MainActor in controller?.ndefSession(session, didDetect: tags) }
+    }
+}
+
 enum WriteFailure: Error, CustomStringConvertible {
     case unsupportedTag
     case unsupportedModel(String)
@@ -117,6 +140,7 @@ enum WriteFailure: Error, CustomStringConvertible {
     case tagNotFound
     case tooManySessionSwitches
     case shortResponse(String)
+    case notISO7816InNDEFSession(String)
 
     var description: String {
         switch self {
@@ -127,6 +151,7 @@ enum WriteFailure: Error, CustomStringConvertible {
         case .tagNotFound: return "つなぎ直そうとしましたが、EZ Sign が見つかりませんでした"
         case .tooManySessionSwitches: return "NFC セッションの切り替えが多すぎます"
         case let .shortResponse(bytes): return "応答が短すぎます（\(bytes)）"
+        case let .notISO7816InNDEFSession(kind): return "NDEF セッションでは命令を送れない種類のタグでした（\(kind)）"
         }
     }
 }

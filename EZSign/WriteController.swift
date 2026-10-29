@@ -89,9 +89,15 @@ final class WriteController: ObservableObject {
     /// 誰も待っていないときに見つかったタグ
     private var detectedTag: NFCTag?
 
+    /// 実験: NDEF セッションで書き込む（startNDEFExperiment）
+    private let ndefDelegate = NDEFSessionDelegate()
+    private var ndefSession: NFCNDEFReaderSession?
+    private var ndefBytes: [UInt8] = []
+
     init() {
         preview = TestPattern.make(stamp: "#- ----------", layout: PanelModel.inch4_2.layout)
         delegate.controller = self
+        ndefDelegate.controller = self
     }
 
     func start() {
@@ -439,6 +445,147 @@ final class WriteController: ObservableObject {
             tagWaiter = nil
             waiter.resume(throwing: error)
         }
+    }
+
+    // MARK: - 実験: NDEF セッション
+
+    /// 実験: NDEF 用の読み取りセッション（NFCNDEFReaderSession）で書き込む。
+    /// 公式アプリは認識してから転送を始めるまでが遅く、NDEF セッションでタグの中身を読んでから
+    /// つないでいるのかもしれない。NDEF セッションでも接続から約 20 秒で切られるかを確かめ、
+    /// あわせてパネルに入っている NDEF の中身をログに残す。描画中は POLL し続ける。
+    func startNDEFExperiment() {
+        guard !phase.isRunning else { return }
+        guard NFCNDEFReaderSession.readingAvailable else {
+            phase = .failed("この端末では NFC の読み書きが使えません")
+            return
+        }
+        runNumber += 1
+        let frame = makePattern()
+        preview = frame
+        log = []
+        sessionStart = .now
+        sessionBegunAt = .now
+        connectedAt = nil
+        append("書き込み #\(runNumber)（実験: NDEF セッション）/ iOS \(UIDevice.current.systemVersion) / \(deviceModel())"
+               + " / 画素の並び \(layout.rawValue)")
+        ndefBytes = frame.encoded(layout: layout)
+        let session = NFCNDEFReaderSession(delegate: ndefDelegate, queue: nil, invalidateAfterFirstRead: false)
+        session.alertMessage = "EZ Sign にタッチしてください"
+        ndefSession = session
+        phase = .waitingForTag
+        session.begin()
+    }
+
+    func ndefSessionDidBecomeActive(_ session: NFCNDEFReaderSession) {
+        guard session === ndefSession else { return }
+        append("NFC の読み取りを開始しました（NDEF セッション）")
+    }
+
+    func ndefSession(_ session: NFCNDEFReaderSession, didDetect tags: [NFCNDEFTag]) {
+        guard session === ndefSession, phase == .waitingForTag else { return }
+        guard tags.count == 1, let tag = tags.first else {
+            append("タグが \(tags.count) 個見つかりました")
+            session.alertMessage = "EZ Sign だけをタッチしてください"
+            session.restartPolling()
+            return
+        }
+        phase = .checkingPlacement
+        Task { await runNDEF(tag, session: session) }
+    }
+
+    func ndefSession(_ session: NFCNDEFReaderSession, didInvalidateWith error: Error) {
+        guard session === ndefSession else { return }
+        ndefSession = nil
+        append("NFC セッション終了（NDEF）: \(describe(error))（開始から \(sessionAgeText())、\(connectionAgeText())）")
+        if phase.isRunning { phase = .failed(describe(error)) }
+    }
+
+    private func runNDEF(_ tag: NFCNDEFTag, session: NFCNDEFReaderSession) async {
+        do {
+            try await session.connect(to: tag)
+            connectedAt = .now
+            append("タグ検出・接続（開始から \(sessionAgeText())）: \(ndefTagKind(tag))")
+            let (status, capacity) = try await tag.queryNDEFStatus()
+            append("NDEF の状態: \(ndefStatusName(status)) / 容量 \(capacity) バイト")
+            if status != .notSupported {
+                do {
+                    let message = try await tag.readNDEF()
+                    append("NDEF のレコード: \(message.records.count) 個")
+                    for (index, record) in message.records.enumerated() {
+                        append(describeRecord(index, record))
+                    }
+                } catch {
+                    append("NDEF を読めませんでした: \(describe(error))")
+                }
+            }
+            guard let iso = tag as? NFCISO7816Tag else {
+                throw WriteFailure.notISO7816InNDEFSession(ndefTagKind(tag))
+            }
+            let proto = makeProtocol(ISO7816Transport(tag: iso))
+            try await proto.checkPlacement()
+            session.alertMessage = "転送を開始します。動かさないでください"
+            phase = .authenticating
+            let info = try await proto.begin()
+            if let model = info.identify() {
+                append("機種: \(model.name)")
+                guard model == .inch4_2 else { throw WriteFailure.unsupportedModel(model.name) }
+            }
+            try await proto.sendFrame(ndefBytes, progress: { [weak self] sent, total in
+                self?.phase = .sending(sent: sent, total: total)
+                self?.ndefSession?.alertMessage = "転送中です（\(sent * 100 / total)%）。動かさないでください"
+            })
+            let refreshStart = ContinuousClock.now
+            try await proto.startRefresh()
+            phase = .refreshing(seconds: 0)
+            let result = try await proto.waitForRefresh(startedAt: refreshStart, progress: { [weak self] elapsed in
+                guard let self else { return }
+                let seconds = Int(elapsed.seconds)
+                guard self.phase != .refreshing(seconds: seconds) else { return }
+                self.phase = .refreshing(seconds: seconds)
+                self.ndefSession?.alertMessage = "描画中です（\(seconds) 秒）。動かさないでください"
+            })
+            if case let .done(elapsed) = result {
+                phase = .done(seconds: elapsed.seconds)
+            }
+            append("完了（開始から \(elapsedText())、\(connectionAgeText())）")
+            session.alertMessage = "書き込みが終わりました"
+            try? await Task.sleep(for: .seconds(1))
+            session.invalidate()
+        } catch {
+            let message = describe(error)
+            append("失敗: \(message)（\(connectionAgeText())）")
+            phase = .failed(message)
+            session.invalidate(errorMessage: message)
+        }
+    }
+
+    /// NDEF セッションで渡されたタグが、どの種類の命令を受け付けるか。
+    private func ndefTagKind(_ tag: NFCNDEFTag) -> String {
+        var kinds: [String] = []
+        if tag is NFCISO7816Tag { kinds.append("ISO 7816") }
+        if tag is NFCMiFareTag { kinds.append("MIFARE") }
+        if tag is NFCFeliCaTag { kinds.append("FeliCa") }
+        if tag is NFCISO15693Tag { kinds.append("ISO 15693") }
+        let names = kinds.isEmpty ? "NDEF のみ" : kinds.joined(separator: " / ")
+        return "\(names)（\(String(describing: type(of: tag)))）"
+    }
+
+    private func ndefStatusName(_ status: NFCNDEFStatus) -> String {
+        switch status {
+        case .notSupported: return "NDEF 非対応"
+        case .readWrite: return "読み書きできる"
+        case .readOnly: return "読み取り専用"
+        @unknown default: return "不明（\(status.rawValue)）"
+        }
+    }
+
+    private func describeRecord(_ index: Int, _ record: NFCNDEFPayload) -> String {
+        let type = String(decoding: record.type, as: UTF8.self)
+        let payload = [UInt8](record.payload)
+        // 読める文字だけ出す（URL などが入っていれば分かる）
+        let text = String(payload.prefix(80).map { (0x20...0x7E).contains($0) ? Character(UnicodeScalar($0)) : "." })
+        return "  #\(index + 1) TNF \(record.typeNameFormat.rawValue) / type \"\(type)\" / \(payload.count) バイト"
+            + " / 先頭 \(hexString(payload.prefix(24))) / 文字 \(text)"
     }
 
     // MARK: - 補助
