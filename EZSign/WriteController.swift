@@ -71,7 +71,7 @@ final class WriteController: ObservableObject {
             phase = .failed("NFC セッションを作れませんでした")
             return
         }
-        session.alertMessage = "iPhone の上部を EZ Sign の NFC の位置に当ててください"
+        session.alertMessage = "EZ Sign にタッチしてください"
         self.session = session
         phase = .waitingForTag
         session.begin()
@@ -115,7 +115,7 @@ final class WriteController: ObservableObject {
         while true {
             let proto = makeProtocol(try await waitForTag())
             phase = .checkingPlacement
-            session?.alertMessage = "位置を確認しています。そのまま動かさないでください"
+            session?.alertMessage = "認識しました。確認しています…"
             do {
                 try await proto.checkPlacement()
             } catch let error as WriteFailure {
@@ -123,11 +123,11 @@ final class WriteController: ObservableObject {
             } catch {
                 append("位置確認で失敗: \(describe(error))。書き込まずに当て直してもらいます")
                 phase = .waitingForTag
-                session?.alertMessage = "うまく通信できませんでした。当てる位置を合わせて、もう一度かざしてください"
+                session?.alertMessage = "うまく通信できませんでした。当てる位置を少しずらして、もう一度タッチしてください"
                 session?.restartPolling()
                 continue
             }
-            session?.alertMessage = "位置 OK。書き込みを始めます。動かさないでください"
+            session?.alertMessage = "転送を開始します。動かさないでください"
             do {
                 phase = .authenticating
                 let info = try await proto.begin()
@@ -139,7 +139,7 @@ final class WriteController: ObservableObject {
                 }
                 try await proto.sendFrame(bytes, progress: { [weak self] sent, total in
                     self?.phase = .sending(sent: sent, total: total)
-                    self?.session?.alertMessage = "送信中 \(sent) / \(total)"
+                    self?.session?.alertMessage = "転送中です（\(sent * 100 / total)%）。動かさないでください"
                 })
                 let refreshStart = ContinuousClock.now
                 try await proto.startRefresh()
@@ -148,7 +148,7 @@ final class WriteController: ObservableObject {
                 attempt += 1
                 append("送信中に接続が切れました（\(connectionAgeText())）。最初からやり直します")
                 phase = .waitingForTag
-                session?.alertMessage = "接続が切れました。もう一度かざしてください"
+                session?.alertMessage = "接続が切れました。もう一度タッチしてください"
                 session?.restartPolling()
             }
         }
@@ -181,7 +181,7 @@ final class WriteController: ObservableObject {
         let seconds = Int(elapsed.seconds)
         guard phase != .refreshing(seconds: seconds) else { return }
         phase = .refreshing(seconds: seconds)
-        session?.alertMessage = "描画中 \(seconds) 秒。動かさないでください"
+        session?.alertMessage = "描画中です（\(seconds) 秒）。動かさないでください"
     }
 
     private func makeProtocol(_ transport: APDUTransport) -> EZSignProtocol {
@@ -245,7 +245,7 @@ final class WriteController: ObservableObject {
         guard session === self.session else { return }
         guard tags.count == 1, let tag = tags.first else {
             append("タグが \(tags.count) 個見つかりました")
-            session.alertMessage = "EZ Sign だけをかざしてください"
+            session.alertMessage = "EZ Sign だけをタッチしてください"
             session.restartPolling()
             return
         }
@@ -319,11 +319,11 @@ extension WriteController.Phase {
     var title: String {
         switch self {
         case .idle: return "待機中"
-        case .waitingForTag: return "EZ Sign にかざしてください"
+        case .waitingForTag: return "EZ Sign にタッチしてください"
         case .checkingPlacement: return "位置を確認中（動かさないでください）"
         case .authenticating: return "認証中"
-        case let .sending(sent, total): return "送信中 \(sent) / \(total)"
-        case let .refreshing(seconds): return "描画中 \(seconds) 秒（動かさないでください）"
+        case let .sending(sent, total): return "転送中です（\(sent * 100 / total)%）"
+        case let .refreshing(seconds): return "描画中です（\(seconds) 秒）。動かさないでください"
         case .reconnecting: return "つなぎ直しています（動かさないでください）"
         case let .done(seconds): return "完了（描画 \(formatSeconds(seconds)) 秒）"
         case let .failed(message): return "失敗: \(message)"
