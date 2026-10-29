@@ -4,9 +4,10 @@
 <dict>
 	<key>NFCReaderUsageDescription</key>
 	<string>EZ Sign に画像を書き込むために NFC を使います。</string>
-	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
-	<array>
-		<string>D2760000850101</string>
-	</array>
+	<!--
+	  com.apple.developer.nfc.readersession.iso7816.select-identifiers（D2760000850101）を
+	  書くと EZ Sign は ISO 7816 タグとして渡され、接続から約 20 秒で打ち切られた。
+	  今は書かずに MIFARE タグとして受け取り、同じ上限がかかるかを確かめている（docs/PROTOCOL.md）。
+	-->
 </dict>
 </plist>
