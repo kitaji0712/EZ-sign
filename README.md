@@ -13,16 +13,17 @@
 
 ## 動かし方
 
-1. リポジトリを取得して、作業ブランチに切り替えます。
+1. リポジトリを取得して、作業ブランチに切り替えます。非公開リポジトリなので、先に [GitHub CLI](https://cli.github.com) の `gh auth login` で GitHub にログインしておきます。
    ```sh
    git clone https://github.com/kitaji0712/ez-sign.git
    cd ez-sign
    git checkout claude/gifted-tesla-eq173c
    ```
+   更新があったら、このフォルダで `git pull` を実行します。
 2. `EZSign.xcodeproj` をダブルクリックして Xcode で開きます（`Package.swift` はテスト用なので開かないでください）。
-3. 左の一覧で一番上の `EZSign` → TARGETS の `EZSign` → **Signing & Capabilities** を開き、**Team** に自分のチームを選びます。
-   - 「Bundle Identifier が使えない」と出たら、`com.kitaji0712.ezsign` を別の名前（例: `com.kitaji0712.ezsign2`）に変えてください。
-   - 同じ画面に **Near Field Communication Tag Reading** が表示されていれば OK です。なければ「+ Capability」から追加してください。
+3. 署名のチームは **ARTIVATION CORP.（Team ID `4YKW4T3D7N`）** に設定済みです。左の一覧で一番上の `EZSign` → TARGETS の `EZSign` → **Signing & Capabilities** で、エラーが出ていないことだけ確認してください。
+   - Xcode → Settings → Accounts で、ARTIVATION CORP. の「Certificates, Identifiers, & Profiles」が ✓ になっている必要があります（ⓧ ならチームの管理者に権限を付けてもらいます）。
+   - 「Revoke certificate」と出たら、「Revoke Certificate」を押すと証明書が作り直されます。
 4. iPhone をケーブルで Mac につなぎ、Xcode 上部の実行先で自分の iPhone を選んで ▶（⌘R）を押します。
 5. 初めての場合は iPhone 側で次の設定が必要です。
    - 設定 → プライバシーとセキュリティ → **デベロッパモード** をオン（再起動を求められます）
