@@ -8,3 +8,4 @@ Santek EZ Sign（NFC 給電の 4 色電子ペーパー、4.2 インチ 400×300�
 - クラウド環境には Xcode がない。Core は Docker の Swift イメージ（`mirror.gcr.io/library/swift:6.1-noble`）で `swift test`。アプリのビルドは CI（macOS）か利用者の Mac で確認する。
 - 文字は内蔵の 5×7 ドットフォントで描き、アンチエイリアスしない（パネルは灰色を出せない）。
 - 画面の文言・ログ・ドキュメントは日本語。
+- 利用者は `install-to-iphone.command`（ダブルクリック）で最新を取得・ビルド・iPhone に入れる。ブランチ名と Bundle ID はこのファイルにも書いてあるので、変えたら合わせる。
